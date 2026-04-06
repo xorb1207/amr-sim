@@ -1,0 +1,163 @@
+{
+  "version": 1,
+  "name": "fab_l1_default",
+  "imageDataUrl": "",
+  "imageWidth": 0,
+  "imageHeight": 0,
+  "nodes": [
+    {
+      "id": "n_a",
+      "x": 0,
+      "y": 10,
+      "label": "Station-A",
+      "role": "station"
+    },
+    {
+      "id": "n_b",
+      "x": 20,
+      "y": 10,
+      "label": "Station-B",
+      "role": "station"
+    },
+    {
+      "id": "n_c",
+      "x": 10,
+      "y": 5,
+      "label": "Station-C",
+      "role": "station"
+    },
+    {
+      "id": "n_k1",
+      "x": 0,
+      "y": 0,
+      "label": "Charger-1",
+      "role": "charger"
+    },
+    {
+      "id": "n_k2",
+      "x": 20,
+      "y": 0,
+      "label": "Charger-2",
+      "role": "charger"
+    },
+    {
+      "id": "n_w1",
+      "x": 10,
+      "y": 10,
+      "label": "",
+      "role": "waypoint"
+    },
+    {
+      "id": "n_w2",
+      "x": 10,
+      "y": 0,
+      "label": "",
+      "role": "waypoint"
+    },
+    {
+      "id": "n_1775370391131",
+      "x": 0,
+      "y": 5,
+      "label": "Station-D",
+      "role": "waypoint"
+    },
+    {
+      "id": "n_1775370395931",
+      "x": 20,
+      "y": 5,
+      "label": "Charger-3",
+      "role": "charger"
+    },
+    {
+      "id": "n_1775394188137",
+      "x": 30,
+      "y": 10,
+      "label": "Station-E",
+      "role": "station"
+    },
+    {
+      "id": "n_1775394188879",
+      "x": 30,
+      "y": 5,
+      "label": "Station-F",
+      "role": "station"
+    },
+    {
+      "id": "n_1775394189832",
+      "x": 30,
+      "y": 0,
+      "label": "Station-G",
+      "role": "station"
+    }
+  ],
+  "edges": [
+    {
+      "from": "n_a",
+      "to": "n_1775370391131"
+    },
+    {
+      "from": "n_k1",
+      "to": "n_1775370391131"
+    },
+    {
+      "from": "n_k1",
+      "to": "n_w2"
+    },
+    {
+      "from": "n_w2",
+      "to": "n_k2"
+    },
+    {
+      "from": "n_k2",
+      "to": "n_1775370395931"
+    },
+    {
+      "from": "n_1775370395931",
+      "to": "n_b"
+    },
+    {
+      "from": "n_b",
+      "to": "n_w1"
+    },
+    {
+      "from": "n_w1",
+      "to": "n_a"
+    },
+    {
+      "from": "n_w1",
+      "to": "n_c"
+    },
+    {
+      "from": "n_c",
+      "to": "n_w2"
+    },
+    {
+      "from": "n_1775370391131",
+      "to": "n_c"
+    },
+    {
+      "from": "n_c",
+      "to": "n_1775370395931"
+    },
+    {
+      "from": "n_b",
+      "to": "n_1775394188137"
+    },
+    {
+      "from": "n_1775394188137",
+      "to": "n_1775394188879"
+    },
+    {
+      "from": "n_1775370395931",
+      "to": "n_1775394188879"
+    },
+    {
+      "from": "n_k2",
+      "to": "n_1775394189832"
+    },
+    {
+      "from": "n_1775394189832",
+      "to": "n_1775394188879"
+    }
+  ]
+}
