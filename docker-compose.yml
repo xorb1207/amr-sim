@@ -1,0 +1,31 @@
+# FAB AMR ICS — 단일 스택 실행
+# 사용법: docker compose up --build
+# 폐쇄망: 인터넷 가능한 환경에서 `docker compose build` 후
+#         `docker save fab-amr-ics-web fab-amr-ics-api | gzip > fab-amr-ics.tar.gz` 로 이미지 반출
+
+services:
+  backend:
+    image: fab-amr-ics-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    environment:
+      SIM_HZ: "20"
+      # 브라우저 직접 접속 시 CORS; nginx 동일 출처 사용 시에도 무해
+      CORS_ALLOW_ALL: "1"
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  web:
+    image: fab-amr-ics-web:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

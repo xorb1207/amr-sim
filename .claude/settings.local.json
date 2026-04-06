@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./bin/python:*)",
+      "Bash(python3:*)",
+      "Bash(./bin/python3.13 -c ':*)",
+      "Bash(./bin/python3.13:*)",
+      "Bash(pip3 install:*)",
+      "Read(//tmp/**)",
+      "Read(//private/tmp/**)",
+      "Bash(pip install:*)",
+      "Bash(decompile3 __pycache__/simulation.cpython-312.pyc)",
+      "Bash(pycdc __pycache__/simulation.cpython-312.pyc)",
+      "Bash(/opt/homebrew/Cellar/python@3.13/3.13.2/bin/python3:*)"
+    ]
+  }
+}

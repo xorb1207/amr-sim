@@ -1,0 +1,10 @@
+**/node_modules
+**/__pycache__
+**/.venv
+**/venv/lib
+**/venv/bin
+**/venv/include
+**/.git
+dashboard/dist
+*.pyc
+.DS_Store
