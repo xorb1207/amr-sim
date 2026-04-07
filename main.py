@@ -37,6 +37,9 @@ from simulation import (
     make_amr,
     nearest_charging_station,
     record_task_completed,
+    record_task_interrupted,
+    record_task_failed,
+    record_charge_event,
     refresh_station_cache,
     rescue_warp_amr,
     set_nav_path_for_destination,
@@ -46,6 +49,7 @@ from simulation import (
     station_claimed_by_other,
     tick,
     try_autostart_pending,
+    run_scenario_isolated,
 )
 
 # ─── 설정 (폐쇄망·Docker: 환경변수로 조정) ─────────────────
@@ -431,16 +435,40 @@ def analytics_report_text():
         "WAVE Fleet Planner — Analysis Report",
         f"Generated: {datetime.now().isoformat()}",
         "",
-        f"Simulation time (s): {s['sim_time_s']}",
-        f"Fleet size: {s['fleet_size']}",
-        f"Tasks completed: {s['tasks_completed']}",
-        f"Tasks started: {s['tasks_started']}",
-        f"Total transport (m): {s['total_transport_m']}",
-        f"Fleet run utilization (%): {s['utilization_run_pct']}",
-        f"Fleet idle (%): {s['utilization_idle_pct']}",
-        f"Avg pending wait (s/robot): {s['avg_pending_wait_s']}",
+        "=== 플릿 기본 현황 ===",
+        f"시뮬레이션 시간 (s):       {s['sim_time_s']}",
+        f"플릿 크기:                 {s['fleet_size']}",
+        f"시작 작업 수:              {s['tasks_started']}",
+        f"완료 작업 수:              {s['tasks_completed']}",
+        f"중단 작업 수:              {s.get('tasks_interrupted', 0)}",
+        f"실패 작업 수:              {s.get('tasks_failed', 0)}",
+        f"작업 완료율 (%):           {s.get('task_completion_rate', 0)}",
+        f"누적 운송 거리 (m):        {s['total_transport_m']}",
         "",
-        "Operational params:",
+        "=== 태스크 리드타임 ===",
+        f"평균 리드타임 (s):         {s.get('avg_lead_time_s', 0)}",
+        f"평균 실행시간 (s):         {s.get('avg_run_time_s', 0)}",
+        f"평균 큐 대기 (s):          {s.get('avg_queue_wait_s', 0)}",
+        f"P95 리드타임 (s):          {s.get('p95_lead_time_s', 0)}",
+        f"SLA 기준 (s):              {s.get('sla_threshold_s', 120)}",
+        f"SLA 달성률 (%):            {s.get('sla_achievement_pct', 0)}",
+        "",
+        "=== 가동률 분해 ===",
+        f"운행 가동률 (%):           {s['utilization_run_pct']}",
+        f"유휴 가동률 (%):           {s['utilization_idle_pct']}",
+        f"충전 가동률 (%):           {s.get('utilization_charge_pct', 0)}",
+        f"평균 대기열 대기 (s/대):    {s['avg_pending_wait_s']}",
+        "",
+        "=== 충전 전략 ===",
+        f"총 충전 횟수:              {s.get('charge_count', 0)}",
+        f"긴급 충전 횟수:            {s.get('emergency_charge_count', 0)}",
+        f"긴급 충전 비율 (%):        {s.get('emergency_charge_ratio', 0)}",
+        "",
+        "=== 개별 로봇 가동률 ===",
+        *[f"  {rid}: 운행 {pct}% | 충전 {s.get('robot_charge_pct', {}).get(rid, 0)}%"
+          for rid, pct in s.get("robot_utilization_pct", {}).items()],
+        "",
+        "=== 운영 파라미터 ===",
         *[f"  {k}: {v}" for k, v in s.get("sim_params", {}).items()],
     ]
     return "\n".join(lines)
@@ -677,7 +705,7 @@ def done_task(task_id: str):
     amr["status"] = "idle"
     clear_nav(amr)
     snap_amr_to_location(amr)
-    record_task_completed()
+    record_task_completed(task)
     try_autostart_pending(amr, amr_list, task_list)
 
     return {"message": f"{task_id} 완료", "task": task, "amr": amr}
@@ -694,351 +722,169 @@ def cancel_task(task_id: str):
     return {"error": f"{task_id}를 찾을 수 없습니다"}
 
 
+# ─── 시나리오 Job 저장소 ──────────────────────────────────
+# main.py의 시나리오 섹션 전체를 아래로 교체하세요.
+# (기존 _run_single_scenario 함수와 /scenario/run 두 개 모두 삭제)
 
-# ─── 시나리오 시뮬레이션 API ─────────────────────────
+import uuid
+
+# job_id → 상태 딕셔너리
+# status: "running" | "done" | "error" | "cancelled"
+_scenario_jobs: Dict[str, Dict[str, Any]] = {}
+
 
 class ScenarioConfig(BaseModel):
-    fleet_sizes: List[int] = Field(default=[3, 5, 7])
-    duration_s: float = Field(default=300.0, ge=30, le=3600)
-    job_interval_s: float = Field(default=7.0, ge=2, le=60)
-    nav_speed: float = Field(default=1.35, ge=0.2, le=4.0)
-    battery_drain_running: float = Field(default=0.8, ge=0.1, le=5.0)
-    battery_charge_rate: float = Field(default=3.0, ge=0.5, le=20.0)
+    fleet_sizes: List[int] = Field(default=[5, 7, 9, 12])
+    duration_s: float = Field(default=1800.0, ge=30, le=3600)
+    job_interval_s: float = Field(default=4.0, ge=2, le=60)
+    nav_speed: float = Field(default=2.0, ge=0.2, le=4.0)
+    battery_drain_running: float = Field(default=0.18, ge=0.01, le=5.0)
+    battery_charge_rate: float = Field(default=5.0, ge=0.5, le=20.0)
+    sla_threshold_s: float = Field(default=300.0, ge=10, le=3600)
 
 
-def _run_single_scenario(
-    fleet_size: int,
-    duration_s: float,
-    job_interval_s: float,
-    nav_speed: float,
-    battery_drain: float,
-    charge_rate: float,
-) -> Dict[str, Any]:
-    from wave_map import get_config as _gc
-    from simulation import (
-        make_amr, refresh_station_cache,
-        STATIONS, CHARGING_STATIONS,
-        ensure_amr_shape, compute_acs_state,
-        station_claimed_by_other,
-        evaluate_transport_energy_budget,
-        start_task_for_amr,
-        clear_nav, snap_amr_to_location,
-        nearest_free_charger,
-        ARRIVAL_EPS, CONFLICT_DIST_M,
-        CHARGE_TRIGGER_PCT, CHARGE_COMPLETE_PCT,
-        LOW_BATTERY_FORCE_CHARGE_PCT,
-        station_coords,
-    )
-    import math, random
-    from datetime import datetime as _dt
-    from collections import deque
+def _run_scenario_job(job_id: str, config: ScenarioConfig) -> None:
+    """ThreadPoolExecutor에서 실행되는 동기 함수."""
+    job = _scenario_jobs[job_id]
+    fleet_sizes = config.fleet_sizes
+    total = len(fleet_sizes)
+    results: List[Dict[str, Any]] = []
 
-    refresh_station_cache()
-
-    local_params = {
-        "nav_speed": nav_speed,
-        "battery_drain_running": battery_drain,
-        "battery_drain_idle": battery_drain * 0.06,
-        "battery_drain_running_nopower": battery_drain * 0.38,
-        "battery_charge_rate": charge_rate,
-        "safety_margin_pct": 10.0,
-        "critical_battery_pct": 8.0,
-        "yield_stall_reroute_s": 3.5,
-        "yield_stall_abort_s": 9.0,
-    }
-
-    local_analytics = {
-        "sim_time_s": 0.0,
-        "tasks_completed": 0,
-        "tasks_started": 0,
-        "total_transport_m": 0.0,
-        "robot_running_s": {},
-        "robot_idle_s": {},
-        "robot_wait_pending_s": {},
-    }
-
-    labels = [s for s in STATIONS if s not in CHARGING_STATIONS]
-    if not labels:
-        labels = list(STATIONS.keys())
-    charger_labels = sorted(CHARGING_STATIONS)
-
-    amrs: List[Dict[str, Any]] = []
-    for i in range(fleet_size):
-        if i % 5 == 4 and charger_labels:
-            loc = charger_labels[i % len(charger_labels)]
-            bat = 55.0 + (i % 3) * 8
-            st = "charging"
-        else:
-            loc = labels[i % len(labels)]
-            bat = 75.0 + (i % 5) * 4
-            st = "idle"
-        amrs.append(make_amr(f"S{fleet_size}-{i+1:02d}", st, loc, bat))
-
-    tasks: List[Dict[str, Any]] = []
-    task_counter = [1]
-    charger_res: Dict[str, str] = {}
-    internal_ctr = [1]
-
-    def _try_autostart(a: Dict[str, Any]) -> None:
-        if a["status"] != "idle":
+    for idx, size in enumerate(fleet_sizes):
+        if job.get("cancel_requested"):
+            job["status"] = "cancelled"
+            job["message"] = "사용자가 취소했습니다"
             return
-        pending = [t for t in tasks if t.get("amr_id") == a["id"] and t.get("status") == "pending"]
-        if not pending:
-            return
-        pending.sort(key=lambda t: (-int(t.get("priority", 1)), str(t.get("created_at", ""))))
-        for t in pending:
-            if start_task_for_amr(t, a, amrs, tasks) is None:
-                local_analytics["tasks_started"] += 1
-                return
 
-    def _begin_charge_local(a: Dict[str, Any]) -> None:
-        ch = nearest_free_charger(a["id"], float(a["x"]), float(a["y"]), amrs, tasks)
-        if not ch:
-            return
-        charger_res[ch] = a["id"]
-        tid = f"CHG-{internal_ctr[0]:04d}"
-        internal_ctr[0] += 1
-        ct = {
-            "task_id": tid, "amr_id": a["id"],
-            "task_type": "charge", "destination": ch,
-            "priority": 99, "status": "pending",
-            "created_at": _dt.now().isoformat(),
-            "started_at": None, "done_at": None,
-            "origin": str(a.get("location", "")),
-            "progress_pct": 0.0, "path_total_m": 0.0,
-            "auto_generated": True,
-        }
-        tasks.append(ct)
-        if start_task_for_amr(ct, a, amrs, tasks) is None:
-            local_analytics["tasks_started"] += 1
+        job["current_fleet_size"] = size
+        job["current_index"] = idx
+        job["message"] = f"{size}대 시뮬레이션 실행 중… ({idx + 1}/{total})"
 
-    def _spawn_job() -> None:
-        dests = [s for s in STATIONS if s not in CHARGING_STATIONS]
-        if not dests:
-            return
-        destination = random.choice(dests)
-        candidates = []
-        for a in amrs:
-            ensure_amr_shape(a)
-            if a["status"] != "idle" or compute_acs_state(a) != "Idle":
-                continue
-            if float(a["battery"]) <= LOW_BATTERY_FORCE_CHARGE_PCT:
-                continue
-            if any(t.get("amr_id") == a["id"] and t.get("status") in ("pending", "running") for t in tasks):
-                continue
-            if station_claimed_by_other(destination, amrs, tasks, a["id"]):
-                continue
-            ok, _, cost, _ = evaluate_transport_energy_budget(
-                a, str(a.get("location", "")), destination, amrs, tasks
+        try:
+            result = run_scenario_isolated(
+                fleet_size=size,
+                duration_s=config.duration_s,
+                job_interval_s=config.job_interval_s,
+                nav_speed=config.nav_speed,
+                battery_drain=config.battery_drain_running,
+                charge_rate=config.battery_charge_rate,
+                sla_threshold_s=config.sla_threshold_s,
             )
-            if ok:
-                candidates.append((cost, a))
-        if not candidates:
+            results.append(result)
+            job["completed_sizes"].append(size)
+            job["partial_results"] = list(results)
+        except Exception as e:
+            job["status"] = "error"
+            job["message"] = f"{size}대 시뮬 오류: {e}"
             return
-        candidates.sort(key=lambda x: x[0])
-        _, amr = candidates[0]
-        tid = f"SC-{fleet_size}-{task_counter[0]:04d}"
-        task_counter[0] += 1
-        t = {
-            "task_id": tid, "amr_id": amr["id"],
-            "task_type": "move", "destination": destination,
-            "pickup_station": str(amr.get("location", "")),
-            "drop_station": destination,
-            "priority": random.randint(1, 5),
-            "status": "pending",
-            "created_at": _dt.now().isoformat(),
-            "started_at": None, "done_at": None,
-            "origin": str(amr.get("location", "")),
-            "progress_pct": 0.0, "path_total_m": 0.0,
-            "auto_generated": True,
-        }
-        tasks.append(t)
-        if start_task_for_amr(t, amr, amrs, tasks) is None:
-            local_analytics["tasks_started"] += 1
 
-    def local_tick(dt: float) -> None:
-        nav = local_params["nav_speed"]
-        dr_run = local_params["battery_drain_running"]
-        dr_idle = local_params["battery_drain_idle"]
-        dr_nop = local_params["battery_drain_running_nopower"]
-        chg = local_params["battery_charge_rate"]
-        local_analytics["sim_time_s"] += dt
+    # 추천 계산
+    best_efficiency = max(results, key=lambda r: r["efficiency_score"])
+    best_throughput = max(results, key=lambda r: r["throughput_per_hour"])
+    best_sla = max(results, key=lambda r: r["sla_achievement_pct"])
+    optimal = best_efficiency
 
-        running = [a for a in amrs if a["status"] == "running" and a.get("path_queue")]
-        yield_ids = set()
-        by_wp: Dict[tuple, list] = {}
-        for a in running:
-            w = a["path_queue"][0]
-            key = (round(w[0]*50), round(w[1]*50))
-            by_wp.setdefault(key, []).append(a["id"])
-        for aids in by_wp.values():
-            if len(aids) >= 2:
-                aids.sort()
-                yield_ids.update(aids[1:])
-        for i in range(len(running)):
-            for j in range(i+1, len(running)):
-                a1, a2 = running[i], running[j]
-                d = math.hypot(float(a1["x"])-float(a2["x"]), float(a1["y"])-float(a2["y"]))
-                if d < CONFLICT_DIST_M:
-                    yield_ids.add(sorted([a1["id"], a2["id"]])[1])
-        for a in amrs:
-            a["acs_yield"] = a["id"] in yield_ids
+    reasons: List[str] = [
+        f"효율 점수 {optimal['efficiency_score']} (최고)",
+        f"시간당 {optimal['throughput_per_hour']}건 처리",
+        f"가동률 {optimal['utilization_run_pct']}%",
+        f"SLA 달성률 {optimal['sla_achievement_pct']}%",
+    ]
+    if best_throughput["fleet_size"] != optimal["fleet_size"]:
+        reasons.append(
+            f"※ 처리량만 보면 {best_throughput['fleet_size']}대가 유리 "
+            f"({best_throughput['throughput_per_hour']}건/h)"
+        )
+    if best_sla["fleet_size"] != optimal["fleet_size"]:
+        reasons.append(
+            f"※ SLA만 보면 {best_sla['fleet_size']}대가 유리 "
+            f"({best_sla['sla_achievement_pct']}%)"
+        )
 
-        for a in amrs:
-            ensure_amr_shape(a)
-            aid = a["id"]
-            st = a["status"]
-
-            if st == "error":
-                continue
-
-            local_analytics["robot_running_s"].setdefault(aid, 0.0)
-            local_analytics["robot_idle_s"].setdefault(aid, 0.0)
-            local_analytics["robot_wait_pending_s"].setdefault(aid, 0.0)
-
-            b = float(a["battery"])
-            has_pending = any(t.get("amr_id") == aid and t.get("status") == "pending" for t in tasks)
-            if st == "idle" and has_pending:
-                local_analytics["robot_wait_pending_s"][aid] += dt
-            elif st == "idle":
-                local_analytics["robot_idle_s"][aid] += dt
-            elif st == "running":
-                local_analytics["robot_running_s"][aid] += dt
-
-            if b <= 0.0:
-                a["battery"] = 0.0
-                a["status"] = "error"
-                clear_nav(a)
-                a["active_task_id"] = None
-                continue
-
-            if st == "running":
-                if b < CHARGE_TRIGGER_PCT and not a.get("low_bat_flag"):
-                    a["low_bat_flag"] = True
-                    a["charge_after_job"] = True
-                target = None
-                pq = a.get("path_queue") or []
-                if pq:
-                    target = (float(pq[0][0]), float(pq[0][1]))
-                if target and not a.get("acs_yield"):
-                    tx, ty = target
-                    x, y = float(a["x"]), float(a["y"])
-                    dx, dy = tx-x, ty-y
-                    dist = math.hypot(dx, dy)
-                    if dist < ARRIVAL_EPS:
-                        a["x"], a["y"] = tx, ty
-                        a["vx"] = a["vy"] = 0.0
-                        pq.pop(0)
-                        a["path_queue"] = pq
-                        local_analytics["total_transport_m"] += dist
-                    else:
-                        step = min(nav*dt, dist)
-                        ux, uy = dx/dist, dy/dist
-                        a["x"] += ux*step
-                        a["y"] += uy*step
-                        a["vx"], a["vy"] = ux*nav, uy*nav
-                        a["yaw"] = math.atan2(dy, dx)
-                        local_analytics["total_transport_m"] += step
-                    b = max(0.0, b - dr_run*dt)
-                else:
-                    a["vx"] = a["vy"] = 0.0
-                    b = max(0.0, b - dr_nop*dt)
-            elif st == "charging":
-                a["vx"] = a["vy"] = 0.0
-                b = min(100.0, b + chg*dt)
-                if b >= CHARGE_COMPLETE_PCT:
-                    a["status"] = "idle"
-                    a["low_bat_flag"] = False
-                    _try_autostart(a)
-            else:
-                a["vx"] = a["vy"] = 0.0
-                b = max(0.0, b - dr_idle*dt)
-
-            a["battery"] = round(max(0.0, min(100.0, b)), 2)
-
-        for a in amrs:
-            if a["status"] != "running":
-                continue
-            tid = a.get("active_task_id")
-            if not tid:
-                continue
-            task = next((t for t in tasks if t.get("task_id") == tid), None)
-            if not task or task.get("status") != "running":
-                continue
-            if a.get("path_queue"):
-                continue
-            dest = str(task.get("destination") or "")
-            tx, ty = station_coords(dest)
-            if math.hypot(float(a["x"])-tx, float(a["y"])-ty) > ARRIVAL_EPS*3:
-                continue
-            task["status"] = "done"
-            task["done_at"] = _dt.now().isoformat()
-            task["progress_pct"] = 100.0
-            local_analytics["tasks_completed"] += 1
-            a["active_task_id"] = None
-            a["location"] = dest
-            clear_nav(a)
-            snap_amr_to_location(a)
-            if dest in CHARGING_STATIONS:
-                if charger_res.get(dest) == a["id"]:
-                    del charger_res[dest]
-                a["status"] = "charging"
-                a["low_bat_flag"] = False
-            else:
-                a["status"] = "idle"
-                if float(a["battery"]) < CHARGE_TRIGGER_PCT or a.get("charge_after_job"):
-                    a["charge_after_job"] = False
-                    _begin_charge_local(a)
-                else:
-                    _try_autostart(a)
-
-    hz = 50.0
-    dt = 1.0 / hz
-    steps = int(duration_s * hz)
-    dispatch_accum = 0.0
-
-    for _ in range(steps):
-        local_tick(dt)
-        dispatch_accum += dt
-        if dispatch_accum >= job_interval_s:
-            dispatch_accum = 0.0
-            _spawn_job()
-
-    n = max(fleet_size, 1)
-    t_total = max(local_analytics["sim_time_s"], 1e-6)
-    capacity = t_total * n
-    run_sum = sum(local_analytics["robot_running_s"].get(a["id"], 0.0) for a in amrs)
-    idle_sum = sum(local_analytics["robot_idle_s"].get(a["id"], 0.0) for a in amrs)
-    completed = local_analytics["tasks_completed"]
-    error_count = sum(1 for a in amrs if a.get("status") == "error")
-    avg_battery = sum(float(a.get("battery", 0)) for a in amrs) / n
-
-    return {
-        "fleet_size": fleet_size,
-        "duration_s": duration_s,
-        "tasks_completed": completed,
-        "tasks_started": local_analytics["tasks_started"],
-        "throughput_per_hour": round(completed / (duration_s / 3600), 1),
-        "utilization_run_pct": round(100.0 * run_sum / capacity, 2),
-        "utilization_idle_pct": round(100.0 * idle_sum / capacity, 2),
-        "avg_pending_wait_s": round(
-            sum(local_analytics["robot_wait_pending_s"].get(a["id"], 0.0) for a in amrs) / n, 2
-        ),
-        "total_transport_m": round(local_analytics["total_transport_m"], 2),
-        "error_amr_count": error_count,
-        "avg_battery_end_pct": round(avg_battery, 1),
-        "tasks_per_amr": round(completed / n, 1),
-        "efficiency_score": round(
-            (completed / n)
-            * (1 - error_count / n)
-            * (run_sum / capacity if capacity > 0 else 0),
-            3
-        ),
+    job["status"] = "done"
+    job["message"] = "완료"
+    job["result"] = {
+        "config": config.model_dump(),
+        "results": results,
+        "recommendation": {
+            "optimal_fleet_size": optimal["fleet_size"],
+            "reason": " | ".join(reasons),
+            "best_by_throughput": best_throughput["fleet_size"],
+            "best_by_sla": best_sla["fleet_size"],
+            "best_by_efficiency": best_efficiency["fleet_size"],
+        },
     }
 
 
 @app.post("/scenario/run")
-def run_scenario(config: ScenarioConfig):
+async def run_scenario(config: ScenarioConfig):
+    """시나리오 실행 시작 → job_id 즉시 반환."""
+    job_id = str(uuid.uuid4())[:8]
+    _scenario_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "running",
+        "message": "시뮬레이션 준비 중…",
+        "fleet_sizes": config.fleet_sizes,
+        "total": len(config.fleet_sizes),
+        "current_index": 0,
+        "current_fleet_size": config.fleet_sizes[0] if config.fleet_sizes else 0,
+        "completed_sizes": [],
+        "partial_results": [],
+        "cancel_requested": False,
+        "result": None,
+        "started_at": datetime.now().isoformat(),
+    }
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _run_scenario_job, job_id, config)
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/scenario/status/{job_id}")
+def get_scenario_status(job_id: str):
+    """진행 상태 폴링."""
+    job = _scenario_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id를 찾을 수 없습니다")
+
+    total = job["total"]
+    done_count = len(job["completed_sizes"])
+    progress_pct = round(done_count / total * 100) if total > 0 else 0
+
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "message": job["message"],
+        "progress_pct": progress_pct,
+        "current_fleet_size": job["current_fleet_size"],
+        "current_index": job["current_index"],
+        "total": total,
+        "completed_sizes": job["completed_sizes"],
+        "partial_results": job["partial_results"],
+        "started_at": job["started_at"],
+    }
+
+
+@app.post("/scenario/cancel/{job_id}")
+def cancel_scenario(job_id: str):
+    """실행 중인 시나리오 취소 요청."""
+    job = _scenario_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id를 찾을 수 없습니다")
+    if job["status"] != "running":
+        return {"message": f"이미 {job['status']} 상태입니다"}
+    job["cancel_requested"] = True
+    return {"message": "취소 요청됨"}
+
+
+@app.get("/scenario/result/{job_id}")
+def get_scenario_result(job_id: str):
+    """완료된 시나리오 결과 조회."""
+    job = _scenario_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id를 찾을 수 없습니다")
+    if job["status"] != "done":
+        raise HTTPException(status_code=400, detail=f"아직 완료되지 않았습니다 (status: {job['status']})")
+    return job["result"]
     results = []
     for size in config.fleet_sizes:
         result = _run_single_scenario(

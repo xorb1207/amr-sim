@@ -6,6 +6,8 @@ import WaveTopNav from "./components/WaveTopNav.jsx"
 import { useToast } from "./hooks/useToast.js"
 import AnalysisReportTab from "./tabs/AnalysisReportTab.jsx"
 import MapEditorTab from "./tabs/MapEditorTab.jsx"
+import ScenarioTab from "./tabs/ScenarioTab.jsx"
+
 
 function badgeClass(status) {
   const map = {
@@ -731,6 +733,9 @@ export default function App() {
       {tab === "analysis" && (
         <AnalysisReportTab analyticsSnap={analyticsSnap} />
       )}
+
+      {tab === "scenario" && <ScenarioTab />}
+
 
       {tab === "dashboard" && (
       <div className="ics-main">

@@ -1,163 +1,110 @@
 {
   "version": 1,
-  "name": "fab_l1_default",
+  "name": "fab_l1_large",
   "imageDataUrl": "",
   "imageWidth": 0,
   "imageHeight": 0,
   "nodes": [
-    {
-      "id": "n_a",
-      "x": 0,
-      "y": 10,
-      "label": "Station-A",
-      "role": "station"
-    },
-    {
-      "id": "n_b",
-      "x": 20,
-      "y": 10,
-      "label": "Station-B",
-      "role": "station"
-    },
-    {
-      "id": "n_c",
-      "x": 10,
-      "y": 5,
-      "label": "Station-C",
-      "role": "station"
-    },
-    {
-      "id": "n_k1",
-      "x": 0,
-      "y": 0,
-      "label": "Charger-1",
-      "role": "charger"
-    },
-    {
-      "id": "n_k2",
-      "x": 20,
-      "y": 0,
-      "label": "Charger-2",
-      "role": "charger"
-    },
-    {
-      "id": "n_w1",
-      "x": 10,
-      "y": 10,
-      "label": "",
-      "role": "waypoint"
-    },
-    {
-      "id": "n_w2",
-      "x": 10,
-      "y": 0,
-      "label": "",
-      "role": "waypoint"
-    },
-    {
-      "id": "n_1775370391131",
-      "x": 0,
-      "y": 5,
-      "label": "Station-D",
-      "role": "waypoint"
-    },
-    {
-      "id": "n_1775370395931",
-      "x": 20,
-      "y": 5,
-      "label": "Charger-3",
-      "role": "charger"
-    },
-    {
-      "id": "n_1775394188137",
-      "x": 30,
-      "y": 10,
-      "label": "Station-E",
-      "role": "station"
-    },
-    {
-      "id": "n_1775394188879",
-      "x": 30,
-      "y": 5,
-      "label": "Station-F",
-      "role": "station"
-    },
-    {
-      "id": "n_1775394189832",
-      "x": 30,
-      "y": 0,
-      "label": "Station-G",
-      "role": "station"
-    }
+    {"id": "n_a1",   "x": 0,   "y": 100, "label": "Station-A1", "role": "station"},
+    {"id": "n_a2",   "x": 160, "y": 100, "label": "Station-A2", "role": "station"},
+    {"id": "n_a3",   "x": 320, "y": 100, "label": "Station-A3", "role": "station"},
+    {"id": "n_a4",   "x": 480, "y": 100, "label": "Station-A4", "role": "station"},
+    {"id": "n_a5",   "x": 640, "y": 100, "label": "Station-A5", "role": "station"},
+
+    {"id": "n_b1",   "x": 0,   "y": 60,  "label": "Station-B1", "role": "station"},
+    {"id": "n_b2",   "x": 160, "y": 60,  "label": "Station-B2", "role": "station"},
+    {"id": "n_b3",   "x": 320, "y": 60,  "label": "Station-B3", "role": "station"},
+    {"id": "n_b4",   "x": 480, "y": 60,  "label": "Station-B4", "role": "station"},
+    {"id": "n_b5",   "x": 640, "y": 60,  "label": "Station-B5", "role": "station"},
+
+    {"id": "n_c1",   "x": 0,   "y": 20,  "label": "Station-C1", "role": "station"},
+    {"id": "n_c2",   "x": 160, "y": 20,  "label": "Station-C2", "role": "station"},
+    {"id": "n_c3",   "x": 320, "y": 20,  "label": "Station-C3", "role": "station"},
+    {"id": "n_c4",   "x": 480, "y": 20,  "label": "Station-C4", "role": "station"},
+    {"id": "n_c5",   "x": 640, "y": 20,  "label": "Station-C5", "role": "station"},
+
+    {"id": "n_chg1", "x": 80,  "y": 100, "label": "Charger-1",  "role": "charger"},
+    {"id": "n_chg2", "x": 240, "y": 60,  "label": "Charger-2",  "role": "charger"},
+    {"id": "n_chg3", "x": 400, "y": 100, "label": "Charger-3",  "role": "charger"},
+    {"id": "n_chg4", "x": 80,  "y": 20,  "label": "Charger-4",  "role": "charger"},
+    {"id": "n_chg5", "x": 400, "y": 20,  "label": "Charger-5",  "role": "charger"},
+
+    {"id": "n_w_a23", "x": 240, "y": 100, "label": "", "role": "waypoint"},
+    {"id": "n_w_a45", "x": 560, "y": 100, "label": "", "role": "waypoint"},
+
+    {"id": "n_w_b12", "x": 80,  "y": 60,  "label": "", "role": "waypoint"},
+    {"id": "n_w_b34", "x": 400, "y": 60,  "label": "", "role": "waypoint"},
+    {"id": "n_w_b45", "x": 560, "y": 60,  "label": "", "role": "waypoint"},
+
+    {"id": "n_w_c23", "x": 240, "y": 20,  "label": "", "role": "waypoint"},
+    {"id": "n_w_c45", "x": 560, "y": 20,  "label": "", "role": "waypoint"}
   ],
   "edges": [
-    {
-      "from": "n_a",
-      "to": "n_1775370391131"
-    },
-    {
-      "from": "n_k1",
-      "to": "n_1775370391131"
-    },
-    {
-      "from": "n_k1",
-      "to": "n_w2"
-    },
-    {
-      "from": "n_w2",
-      "to": "n_k2"
-    },
-    {
-      "from": "n_k2",
-      "to": "n_1775370395931"
-    },
-    {
-      "from": "n_1775370395931",
-      "to": "n_b"
-    },
-    {
-      "from": "n_b",
-      "to": "n_w1"
-    },
-    {
-      "from": "n_w1",
-      "to": "n_a"
-    },
-    {
-      "from": "n_w1",
-      "to": "n_c"
-    },
-    {
-      "from": "n_c",
-      "to": "n_w2"
-    },
-    {
-      "from": "n_1775370391131",
-      "to": "n_c"
-    },
-    {
-      "from": "n_c",
-      "to": "n_1775370395931"
-    },
-    {
-      "from": "n_b",
-      "to": "n_1775394188137"
-    },
-    {
-      "from": "n_1775394188137",
-      "to": "n_1775394188879"
-    },
-    {
-      "from": "n_1775370395931",
-      "to": "n_1775394188879"
-    },
-    {
-      "from": "n_k2",
-      "to": "n_1775394189832"
-    },
-    {
-      "from": "n_1775394189832",
-      "to": "n_1775394188879"
-    }
+    {"from": "n_a1",    "to": "n_chg1"},
+    {"from": "n_chg1",  "to": "n_a2"},
+    {"from": "n_a2",    "to": "n_w_a23"},
+    {"from": "n_w_a23", "to": "n_a3"},
+    {"from": "n_a3",    "to": "n_chg3"},
+    {"from": "n_chg3",  "to": "n_a4"},
+    {"from": "n_a4",    "to": "n_w_a45"},
+    {"from": "n_w_a45", "to": "n_a5"},
+
+    {"from": "n_b1",    "to": "n_w_b12"},
+    {"from": "n_w_b12", "to": "n_b2"},
+    {"from": "n_b2",    "to": "n_chg2"},
+    {"from": "n_chg2",  "to": "n_b3"},
+    {"from": "n_b3",    "to": "n_w_b34"},
+    {"from": "n_w_b34", "to": "n_b4"},
+    {"from": "n_b4",    "to": "n_w_b45"},
+    {"from": "n_w_b45", "to": "n_b5"},
+
+    {"from": "n_c1",    "to": "n_chg4"},
+    {"from": "n_chg4",  "to": "n_c2"},
+    {"from": "n_c2",    "to": "n_w_c23"},
+    {"from": "n_w_c23", "to": "n_c3"},
+    {"from": "n_c3",    "to": "n_chg5"},
+    {"from": "n_chg5",  "to": "n_c4"},
+    {"from": "n_c4",    "to": "n_w_c45"},
+    {"from": "n_w_c45", "to": "n_c5"},
+
+    {"from": "n_a1",    "to": "n_b1"},
+    {"from": "n_b1",    "to": "n_c1"},
+    {"from": "n_c1",    "to": "n_a1"},
+
+    {"from": "n_a2",    "to": "n_b2"},
+    {"from": "n_b2",    "to": "n_c2"},
+    {"from": "n_c2",    "to": "n_a2"},
+
+    {"from": "n_a3",    "to": "n_b3"},
+    {"from": "n_b3",    "to": "n_c3"},
+    {"from": "n_c3",    "to": "n_a3"},
+
+    {"from": "n_a4",    "to": "n_b4"},
+    {"from": "n_b4",    "to": "n_c4"},
+    {"from": "n_c4",    "to": "n_a4"},
+
+    {"from": "n_a5",    "to": "n_b5"},
+    {"from": "n_b5",    "to": "n_c5"},
+    {"from": "n_c5",    "to": "n_a5"},
+
+    {"from": "n_chg1",  "to": "n_w_b12"},
+    {"from": "n_w_b12", "to": "n_chg1"},
+    {"from": "n_w_b12", "to": "n_chg4"},
+    {"from": "n_chg4",  "to": "n_w_b12"},
+
+    {"from": "n_w_a23", "to": "n_chg2"},
+    {"from": "n_chg2",  "to": "n_w_a23"},
+    {"from": "n_chg2",  "to": "n_w_c23"},
+    {"from": "n_w_c23", "to": "n_chg2"},
+
+    {"from": "n_chg3",  "to": "n_w_b34"},
+    {"from": "n_w_b34", "to": "n_chg3"},
+    {"from": "n_w_b34", "to": "n_chg5"},
+    {"from": "n_chg5",  "to": "n_w_b34"},
+
+    {"from": "n_w_a45", "to": "n_w_b45"},
+    {"from": "n_w_b45", "to": "n_w_a45"},
+    {"from": "n_w_b45", "to": "n_w_c45"},
+    {"from": "n_w_c45", "to": "n_w_b45"}
   ]
 }

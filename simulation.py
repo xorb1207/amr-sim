@@ -66,10 +66,23 @@ analytics: Dict[str, Any] = {
     "sim_time_s": 0.0,
     "tasks_completed": 0,
     "tasks_started": 0,
+    "tasks_interrupted": 0,
+    "tasks_failed": 0,
     "total_transport_m": 0.0,
     "robot_running_s": {},
     "robot_idle_s": {},
+    "robot_charge_s": {},
     "robot_wait_pending_s": {},
+    # 태스크 단위 시간 리스트 (초)
+    "task_lead_times": [],      # created_at → done_at
+    "task_run_times": [],       # started_at → done_at
+    "task_queue_waits": [],     # created_at → started_at
+    # 충전 이벤트 카운트
+    "charge_count": 0,
+    "emergency_charge_count": 0,
+    # SLA (기본 120초 이내 완료 목표)
+    "sla_threshold_s": 120.0,
+    "sla_met_count": 0,
     "session_started_mono": time.monotonic(),
 }
 
@@ -673,7 +686,7 @@ def _complete_task(
         task["status"] = "done"
         task["done_at"] = datetime.now().isoformat()
         task["progress_pct"] = 100.0
-        record_task_completed()
+        record_task_completed(task)
         acs_log_event(
             "emergency_drop_done",
             f"{amr['id']} 긴급 하차 완료 → 충전 복귀",
@@ -694,7 +707,7 @@ def _complete_task(
     task["status"] = "done"
     task["done_at"] = datetime.now().isoformat()
     task["progress_pct"] = 100.0
-    record_task_completed()
+    record_task_completed(task)
     acs_log_event(
         "job_completed",
         f"Job Completed · {task.get('task_id')} → {task.get('destination')}",
@@ -817,6 +830,7 @@ def _begin_charge_dispatch(
             continue
         ct["path_total_m"] = path_polyline_total_m(amr)
         record_task_started()
+        record_charge_event(force=force)
         acs_log_event(
             "auto_charge",
             f"{amr['id']} → {ch} 충전 예약·출발 (force={force})",
@@ -842,6 +856,7 @@ def _interrupt_running_transport(
         task["status"] = "interrupted"
         task["done_at"] = datetime.now().isoformat()
         task["interrupt_reason"] = reason
+        record_task_interrupted()
     amr["active_task_id"] = None
     clear_nav(amr)
 
@@ -1048,6 +1063,7 @@ def tick(amr_list: List[Dict[str, Any]], dt: float, task_list: Optional[List[Dic
         aid = amr["id"]
         analytics["robot_running_s"].setdefault(aid, 0.0)
         analytics["robot_idle_s"].setdefault(aid, 0.0)
+        analytics["robot_charge_s"].setdefault(aid, 0.0)
         analytics["robot_wait_pending_s"].setdefault(aid, 0.0)
 
         st = amr["status"]
@@ -1077,6 +1093,7 @@ def tick(amr_list: List[Dict[str, Any]], dt: float, task_list: Optional[List[Dic
                 if rt and rt.get("status") == "running":
                     rt["status"] = "failed"
                     rt["done_at"] = datetime.now().isoformat()
+                    record_task_failed()
             amr["active_task_id"] = None
             amr["status"] = "error"
             release_charger_reservations_for_amr(aid)  # 충전기 예약 즉시 해제
@@ -1158,6 +1175,7 @@ def tick(amr_list: List[Dict[str, Any]], dt: float, task_list: Optional[List[Dic
                     b = max(0.0, min(100.0, b - dr_nop * dt))
         elif st == "charging":
             amr["vx"] = amr["vy"] = 0.0
+            analytics["robot_charge_s"][aid] = float(analytics["robot_charge_s"].get(aid, 0.0)) + dt
             loc = amr.get("location") or ""
             if loc in CHARGING_STATIONS:
                 cx, cy = station_coords(loc)
@@ -1198,8 +1216,49 @@ def record_task_started() -> None:
     analytics["tasks_started"] = int(analytics.get("tasks_started", 0)) + 1
 
 
-def record_task_completed() -> None:
+def record_task_completed(task: Optional[Dict[str, Any]] = None) -> None:
     analytics["tasks_completed"] = int(analytics.get("tasks_completed", 0)) + 1
+    if task is None:
+        return
+    try:
+        done_str = task.get("done_at") or datetime.now().isoformat()
+        created_str = task.get("created_at")
+        started_str = task.get("started_at")
+        done_dt = datetime.fromisoformat(done_str)
+        if created_str:
+            lead = (done_dt - datetime.fromisoformat(created_str)).total_seconds()
+            if 0 <= lead < 86400:
+                analytics["task_lead_times"].append(round(lead, 2))
+                if lead <= float(analytics.get("sla_threshold_s", 120.0)):
+                    analytics["sla_met_count"] = int(analytics.get("sla_met_count", 0)) + 1
+        if started_str:
+            run = (done_dt - datetime.fromisoformat(started_str)).total_seconds()
+            if 0 <= run < 86400:
+                analytics["task_run_times"].append(round(run, 2))
+        if created_str and started_str:
+            wait = (datetime.fromisoformat(started_str) - datetime.fromisoformat(created_str)).total_seconds()
+            if 0 <= wait < 86400:
+                analytics["task_queue_waits"].append(round(wait, 2))
+    except Exception:
+        pass
+
+
+def record_task_interrupted() -> None:
+    analytics["tasks_interrupted"] = int(analytics.get("tasks_interrupted", 0)) + 1
+
+
+def record_task_failed() -> None:
+    analytics["tasks_failed"] = int(analytics.get("tasks_failed", 0)) + 1
+
+
+def record_charge_event(force: bool = False) -> None:
+    analytics["charge_count"] = int(analytics.get("charge_count", 0)) + 1
+    if force:
+        analytics["emergency_charge_count"] = int(analytics.get("emergency_charge_count", 0)) + 1
+
+
+def _avg(lst: list) -> float:
+    return round(sum(lst) / len(lst), 2) if lst else 0.0
 
 
 def build_analytics_summary(amr_list: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1207,17 +1266,57 @@ def build_analytics_summary(amr_list: List[Dict[str, Any]]) -> Dict[str, Any]:
     n = max(len(amr_list), 1)
     run_sum = sum(float(analytics["robot_running_s"].get(a["id"], 0.0)) for a in amr_list)
     idle_sum = sum(float(analytics["robot_idle_s"].get(a["id"], 0.0)) for a in amr_list)
+    charge_sum = sum(float(analytics["robot_charge_s"].get(a["id"], 0.0)) for a in amr_list)
     wait_sum = sum(float(analytics["robot_wait_pending_s"].get(a["id"], 0.0)) for a in amr_list)
     capacity = t * n
+
+    completed = int(analytics.get("tasks_completed", 0))
+    started = int(analytics.get("tasks_started", 0))
+    charge_cnt = int(analytics.get("charge_count", 0))
+    emg_cnt = int(analytics.get("emergency_charge_count", 0))
+    sla_met = int(analytics.get("sla_met_count", 0))
+    lead_times = analytics.get("task_lead_times") or []
+    run_times = analytics.get("task_run_times") or []
+    queue_waits = analytics.get("task_queue_waits") or []
+
+    # 개별 로봇 가동률
+    robot_util = {
+        a["id"]: round(100.0 * float(analytics["robot_running_s"].get(a["id"], 0.0)) / t, 2)
+        for a in amr_list
+    }
+    robot_charge_pct = {
+        a["id"]: round(100.0 * float(analytics["robot_charge_s"].get(a["id"], 0.0)) / t, 2)
+        for a in amr_list
+    }
+
     return {
+        # ─── 기존 지표 ────────────────────────────────────
         "sim_time_s": round(t, 2),
         "fleet_size": n,
-        "tasks_completed": int(analytics.get("tasks_completed", 0)),
-        "tasks_started": int(analytics.get("tasks_started", 0)),
+        "tasks_completed": completed,
+        "tasks_started": started,
+        "tasks_interrupted": int(analytics.get("tasks_interrupted", 0)),
+        "tasks_failed": int(analytics.get("tasks_failed", 0)),
         "total_transport_m": round(float(analytics.get("total_transport_m", 0.0)), 2),
         "utilization_run_pct": round(100.0 * run_sum / capacity, 2),
         "utilization_idle_pct": round(100.0 * idle_sum / capacity, 2),
+        "utilization_charge_pct": round(100.0 * charge_sum / capacity, 2),
         "avg_pending_wait_s": round(wait_sum / n, 2),
+        # ─── 신규: 태스크 품질 ─────────────────────────────
+        "task_completion_rate": round(completed / max(started, 1) * 100.0, 2),
+        "avg_lead_time_s": _avg(lead_times),
+        "avg_run_time_s": _avg(run_times),
+        "avg_queue_wait_s": _avg(queue_waits),
+        "p95_lead_time_s": round(sorted(lead_times)[int(len(lead_times) * 0.95)] if len(lead_times) >= 20 else (_avg(lead_times)), 2),
+        "sla_threshold_s": float(analytics.get("sla_threshold_s", 120.0)),
+        "sla_achievement_pct": round(sla_met / max(completed, 1) * 100.0, 2),
+        # ─── 신규: 충전 전략 ──────────────────────────────
+        "charge_count": charge_cnt,
+        "emergency_charge_count": emg_cnt,
+        "emergency_charge_ratio": round(emg_cnt / max(charge_cnt, 1) * 100.0, 2),
+        # ─── 신규: 개별 로봇 ──────────────────────────────
+        "robot_utilization_pct": robot_util,
+        "robot_charge_pct": robot_charge_pct,
         "sim_params": dict(sim_params),
     }
 
@@ -1373,3 +1472,697 @@ def rescue_warp_amr(
 
 def set_nav_to_destination(amr: Dict[str, Any], destination_label: str) -> bool:
     return set_nav_path_for_destination(amr, destination_label)
+
+
+# ─── 시나리오 격리 실행 ──────────────────────────────────────
+
+import dataclasses
+from typing import Optional
+
+class ScenarioAnalytics:
+    """시나리오 1회 실행용 격리된 analytics 인스턴스."""
+
+    def __init__(self, sla_threshold_s: float = 120.0) -> None:
+        self.sim_time_s: float = 0.0
+        self.tasks_started: int = 0
+        self.tasks_completed: int = 0
+        self.tasks_interrupted: int = 0
+        self.tasks_failed: int = 0
+        self.total_transport_m: float = 0.0
+        self.robot_running_s: Dict[str, float] = {}
+        self.robot_idle_s: Dict[str, float] = {}
+        self.robot_charge_s: Dict[str, float] = {}
+        self.robot_wait_pending_s: Dict[str, float] = {}
+        self.task_lead_times: List[float] = []
+        self.task_run_times: List[float] = []
+        self.task_queue_waits: List[float] = []
+        self.charge_count: int = 0
+        self.emergency_charge_count: int = 0
+        self.sla_threshold_s: float = sla_threshold_s
+        self.sla_met_count: int = 0
+
+    # ── 이벤트 기록 ──────────────────────────────────────────
+
+    def record_started(self) -> None:
+        self.tasks_started += 1
+
+    def record_completed(self, task: Dict[str, Any]) -> None:
+        self.tasks_completed += 1
+        try:
+            done = task.get("done_sim_s")
+            created = task.get("created_sim_s")
+            started = task.get("started_sim_s")
+            if done is None or created is None:
+                return
+            lead = done - created
+            if 0 <= lead < 86400:
+                self.task_lead_times.append(round(lead, 2))
+                if lead <= self.sla_threshold_s:
+                    self.sla_met_count += 1
+            if started is not None:
+                run = done - started
+                if 0 <= run < 86400:
+                    self.task_run_times.append(round(run, 2))
+                wait = started - created
+                if 0 <= wait < 86400:
+                    self.task_queue_waits.append(round(wait, 2))
+        except Exception:
+            pass
+
+    def record_interrupted(self) -> None:
+        self.tasks_interrupted += 1
+
+    def record_failed(self) -> None:
+        self.tasks_failed += 1
+
+    def record_charge(self, force: bool = False) -> None:
+        self.charge_count += 1
+        if force:
+            self.emergency_charge_count += 1
+
+    def tick_accum(self, aid: str, status: str, has_pending: bool, dt: float) -> None:
+        # sim_time_s는 여기서 누적하지 않음 (_local_tick에서 1회만 누적)
+        self.robot_running_s.setdefault(aid, 0.0)
+        self.robot_idle_s.setdefault(aid, 0.0)
+        self.robot_charge_s.setdefault(aid, 0.0)
+        self.robot_wait_pending_s.setdefault(aid, 0.0)
+        if status == "running":
+            self.robot_running_s[aid] += dt
+        elif status == "charging":
+            self.robot_charge_s[aid] += dt
+        elif status == "idle" and has_pending:
+            self.robot_wait_pending_s[aid] += dt
+        else:
+            self.robot_idle_s[aid] += dt
+
+    def add_transport_m(self, m: float) -> None:
+        self.total_transport_m += m
+
+    # ── 요약 생성 ────────────────────────────────────────────
+
+    def _avg(self, lst: List[float]) -> float:
+        return round(sum(lst) / len(lst), 2) if lst else 0.0
+
+    def _p95(self, lst: List[float]) -> float:
+        if not lst:
+            return 0.0
+        s = sorted(lst)
+        if len(s) < 20:
+            return self._avg(s)
+        return round(s[int(len(s) * 0.95)], 2)
+
+    def summary(self, amrs: List[Dict[str, Any]], fleet_size: int, duration_s: float) -> Dict[str, Any]:
+        t = max(self.sim_time_s, 1e-6)
+        n = max(fleet_size, 1)
+        capacity = t * n
+
+        run_sum = sum(self.robot_running_s.get(a["id"], 0.0) for a in amrs)
+        idle_sum = sum(self.robot_idle_s.get(a["id"], 0.0) for a in amrs)
+        charge_sum = sum(self.robot_charge_s.get(a["id"], 0.0) for a in amrs)
+        wait_sum = sum(self.robot_wait_pending_s.get(a["id"], 0.0) for a in amrs)
+
+        completed = self.tasks_completed
+        started = self.tasks_started
+        charge_cnt = self.charge_count
+        emg_cnt = self.emergency_charge_count
+        error_count = sum(1 for a in amrs if a.get("status") == "error")
+        avg_battery = sum(float(a.get("battery", 0)) for a in amrs) / n
+
+        util_run = round(100.0 * run_sum / capacity, 2)
+        util_idle = round(100.0 * idle_sum / capacity, 2)
+        util_charge = round(100.0 * charge_sum / capacity, 2)
+        throughput = round(completed / (duration_s / 3600), 1)
+
+        # 효율 점수: 시간당 처리량 × 가동률 × (1 - 오류율) × SLA달성률
+        sla_pct = round(self.sla_met_count / max(completed, 1) * 100.0, 2)
+        efficiency_score = round(
+            (throughput / max(n, 1))
+            * (util_run / 100.0)
+            * max(1.0 - error_count / n, 0.0)
+            * (sla_pct / 100.0),
+            4,
+        )
+
+        robot_util_pct = {
+            a["id"]: round(100.0 * self.robot_running_s.get(a["id"], 0.0) / t, 2)
+            for a in amrs
+        }
+        robot_charge_pct = {
+            a["id"]: round(100.0 * self.robot_charge_s.get(a["id"], 0.0) / t, 2)
+            for a in amrs
+        }
+
+        return {
+            "fleet_size": fleet_size,
+            "duration_s": duration_s,
+            # 작업
+            "tasks_started": started,
+            "tasks_completed": completed,
+            "tasks_interrupted": self.tasks_interrupted,
+            "tasks_failed": self.tasks_failed,
+            "task_completion_rate": round(completed / max(started, 1) * 100.0, 2),
+            "tasks_per_amr": round(completed / n, 1),
+            "throughput_per_hour": throughput,
+            # 리드타임
+            "avg_lead_time_s": self._avg(self.task_lead_times),
+            "avg_run_time_s": self._avg(self.task_run_times),
+            "avg_queue_wait_s": self._avg(self.task_queue_waits),
+            "p95_lead_time_s": self._p95(self.task_lead_times),
+            # SLA
+            "sla_threshold_s": self.sla_threshold_s,
+            "sla_achievement_pct": sla_pct,
+            # 가동률
+            "utilization_run_pct": util_run,
+            "utilization_idle_pct": util_idle,
+            "utilization_charge_pct": util_charge,
+            "avg_pending_wait_s": round(wait_sum / n, 2),
+            # 충전
+            "charge_count": charge_cnt,
+            "emergency_charge_count": emg_cnt,
+            "emergency_charge_ratio": round(emg_cnt / max(charge_cnt, 1) * 100.0, 2),
+            # 이동
+            "total_transport_m": round(self.total_transport_m, 2),
+            # 종료 상태
+            "error_amr_count": error_count,
+            "avg_battery_end_pct": round(avg_battery, 1),
+            # 개별 로봇
+            "robot_utilization_pct": robot_util_pct,
+            "robot_charge_pct": robot_charge_pct,
+            # 종합 점수
+            "efficiency_score": efficiency_score,
+        }
+
+
+def run_scenario_isolated(
+    fleet_size: int,
+    duration_s: float,
+    job_interval_s: float,
+    nav_speed: float,
+    battery_drain: float,
+    charge_rate: float,
+    sla_threshold_s: float = 120.0,
+) -> Dict[str, Any]:
+    import random
+    """
+    글로벌 analytics/amr_list/task_list를 오염시키지 않는 격리 시나리오 실행.
+    실제 simulation.py의 물리/ACS 로직(tick 내부 함수)을 최대한 재사용.
+    """
+    refresh_station_cache()
+
+    sa = ScenarioAnalytics(sla_threshold_s=sla_threshold_s)
+
+    # ── 로컬 파라미터 (글로벌 sim_params 미변경) ────────────
+    lp: Dict[str, Any] = {
+        "nav_speed": nav_speed,
+        "battery_drain_running": battery_drain,
+        "battery_drain_idle": battery_drain * 0.06,
+        "battery_drain_running_nopower": battery_drain * 0.38,
+        "battery_charge_rate": charge_rate,
+        "safety_margin_pct": 10.0,
+        "critical_battery_pct": 8.0,
+        "yield_stall_reroute_s": 3.5,
+        "yield_stall_abort_s": 9.0,
+    }
+
+    # ── 플릿 초기화 ─────────────────────────────────────────
+    labels = [s for s in STATIONS if s not in CHARGING_STATIONS]
+    if not labels:
+        labels = list(STATIONS.keys())
+    charger_labels = sorted(CHARGING_STATIONS)
+
+    amrs: List[Dict[str, Any]] = []
+    for i in range(fleet_size):
+        if i % 5 == 4 and charger_labels:
+            loc = charger_labels[i % len(charger_labels)]
+            bat = 55.0 + (i % 3) * 8
+            st = "charging"
+        else:
+            loc = labels[i % len(labels)]
+            bat = 75.0 + (i % 5) * 4
+            st = "idle"
+        amrs.append(make_amr(f"S{fleet_size}-{i+1:02d}", st, loc, bat))
+
+    tasks: List[Dict[str, Any]] = []
+    _job_ctr = [1]
+    _local_charger_res: Dict[str, str] = {}
+
+    # ── 헬퍼: 충전기 가용성 (로컬 예약 테이블 기준) ─────────
+    def _local_charger_usable(amr_id: str, label: str) -> bool:
+        if label not in CHARGING_STATIONS:
+            return False
+        res = _local_charger_res.get(label)
+        if res and res != amr_id:
+            return False
+        for a in amrs:
+            if a["id"] != amr_id and a.get("location") == label and a.get("status") == "charging":
+                return False
+        for t in tasks:
+            if t.get("destination") != label:
+                continue
+            oid = str(t.get("amr_id") or "")
+            if oid and oid != amr_id and t.get("status") in ("pending", "running"):
+                return False
+        return True
+
+    def _local_nearest_free_charger(amr_id: str, x: float, y: float) -> Optional[str]:
+        cfg = get_config()
+        scored: List[Tuple[float, str]] = []
+        for name in sorted(CHARGING_STATIONS):
+            if name not in STATIONS:
+                continue
+            if not _local_charger_usable(amr_id, name):
+                continue
+            gd = cfg.graph_distance_m(x, y, name)
+            if gd is not None:
+                scored.append((gd, name))
+        if not scored:
+            return None
+        scored.sort()
+        return scored[0][1]
+
+    def _local_evaluate_budget(a: Dict[str, Any], pickup: str, drop: str) -> Tuple[bool, Optional[str], float, float]:
+        bat = float(a.get("battery") or 0.0)
+        margin = float(lp["safety_margin_pct"])
+        ch = _local_nearest_free_charger(a["id"], float(a["x"]), float(a["y"]))
+        if not ch:
+            return False, None, 0.0, bat
+        dm = graph_chain_distance_m(float(a["x"]), float(a["y"]), [pickup, drop, ch])
+        if dm is None:
+            return False, ch, 0.0, bat
+        # 로컬 파라미터 기반 소모율
+        cost_per_m = lp["battery_drain_running"] / max(lp["nav_speed"], 0.01)
+        cost_pct = dm * cost_per_m
+        after = bat - cost_pct
+        if cost_pct > bat or after < margin:
+            return False, ch, cost_pct, after
+        return True, ch, cost_pct, after
+
+    def _local_charge_leg_ok(a: Dict[str, Any], charger: str) -> Tuple[bool, float, float]:
+        bat = float(a.get("battery") or 0.0)
+        dm = graph_chain_distance_m(float(a["x"]), float(a["y"]), [charger])
+        if dm is None:
+            return False, 0.0, bat
+        cost_per_m = lp["battery_drain_running"] / max(lp["nav_speed"], 0.01)
+        cost_pct = dm * cost_per_m
+        after = bat - cost_pct
+        return (cost_pct < bat), cost_pct, after
+
+    # ── 충전 디스패치 ────────────────────────────────────────
+    def _begin_charge(a: Dict[str, Any], force: bool = False) -> bool:
+        aid = a["id"]
+        # 기존 예약 해제
+        for k in [k for k, v in _local_charger_res.items() if v == aid]:
+            del _local_charger_res[k]
+
+        cfg = get_config()
+        scored: List[Tuple[float, str]] = []
+        for name in sorted(CHARGING_STATIONS):
+            if name not in STATIONS:
+                continue
+            if not _local_charger_usable(aid, name):
+                continue
+            gd = cfg.graph_distance_m(float(a["x"]), float(a["y"]), name)
+            if gd is not None:
+                scored.append((gd, name))
+        scored.sort()
+
+        for _, ch in scored:
+            ok, _, _ = _local_charge_leg_ok(a, ch)
+            if not ok and not force:
+                continue
+            _local_charger_res[ch] = aid
+            tid = f"CHG-{_job_ctr[0]:04d}"
+            _job_ctr[0] += 1
+            ct: Dict[str, Any] = {
+                "task_id": tid, "amr_id": aid,
+                "task_type": "charge", "destination": ch,
+                "priority": 99, "status": "running",
+                "created_at": datetime.now().isoformat(),
+                "started_at": datetime.now().isoformat(),
+                "done_at": None, "origin": str(a.get("location", "")),
+                "progress_pct": 0.0, "path_total_m": 0.0, "auto_generated": True,
+                "created_sim_s": sa.sim_time_s,   # ← 추가
+                "started_sim_s": sa.sim_time_s,   # 충전은 생성 즉시 시작
+                "done_sim_s": None,
+            }
+            tasks.append(ct)
+            a["status"] = "running"
+            a["location"] = ch
+            a["active_task_id"] = tid
+            a["yield_accum_s"] = 0.0
+            a["reroute_tried"] = False
+            if not set_nav_path_for_destination(a, ch):
+                tasks.pop()
+                if _local_charger_res.get(ch) == aid:
+                    del _local_charger_res[ch]
+                a["status"] = "idle"
+                a["location"] = str(a.get("location", ""))
+                a["active_task_id"] = None
+                clear_nav(a)
+                snap_amr_to_location(a)
+                continue
+            ct["path_total_m"] = path_polyline_total_m(a)
+            sa.record_started()
+            sa.record_charge(force=force)
+            return True
+        return False
+
+    # ── 작업 자동시작 ────────────────────────────────────────
+    def _try_autostart(a: Dict[str, Any]) -> None:
+        if a["status"] != "idle":
+            return
+        pending = [t for t in tasks if t.get("amr_id") == a["id"] and t.get("status") == "pending"]
+        if not pending:
+            return
+        pending.sort(key=lambda t: (-int(t.get("priority", 1)), str(t.get("created_at", ""))))
+        for t in pending:
+            dest = str(t.get("destination") or "")
+            ok, _, cost, _ = _local_evaluate_budget(a, str(a.get("location", "")), dest)
+            if not ok:
+                _begin_charge(a, force=False) or _begin_charge(a, force=True)
+                return
+            a["status"] = "running"
+            a["location"] = dest
+            a["active_task_id"] = t["task_id"]
+            a["yield_accum_s"] = 0.0
+            a["reroute_tried"] = False
+            if not set_nav_path_for_destination(a, dest):
+                a["status"] = "idle"
+                a["active_task_id"] = None
+                continue
+            t["status"] = "running"
+            t["started_sim_s"] = sa.sim_time_s  # ← 추가 (기존 started_at 줄 아래)
+            t["started_at"] = datetime.now().isoformat()
+            t["path_total_m"] = path_polyline_total_m(a)
+            sa.record_started()
+            return
+
+    # ── 작업 완료 처리 ───────────────────────────────────────
+    def _complete_task_local(task: Dict[str, Any], a: Dict[str, Any]) -> None:
+        task["status"] = "done"
+        task["done_sim_s"] = sa.sim_time_s  # ← 추가
+        task["done_at"] = datetime.now().isoformat()
+        task["progress_pct"] = 100.0
+        sa.record_completed(task)
+        dest = str(task.get("destination") or "")
+        a["active_task_id"] = None
+        a["location"] = dest
+        clear_nav(a)
+        snap_amr_to_location(a)
+        if dest in CHARGING_STATIONS:
+            if _local_charger_res.get(dest) == a["id"]:
+                del _local_charger_res[dest]
+            a["status"] = "charging"
+            a["low_bat_flag"] = False
+            a["charge_after_job"] = False
+        else:
+            a["status"] = "idle"
+            need_charge = (
+                float(a["battery"]) < CHARGE_TRIGGER_PCT
+                or a.get("charge_after_job")
+                or a.get("low_bat_flag")
+            )
+            a["charge_after_job"] = False
+            if need_charge:
+                _begin_charge(a, force=True)
+            else:
+                _try_autostart(a)
+
+    # ── 작업 생성 (디스패처) ─────────────────────────────────
+    def _spawn_job() -> None:
+        dests = [s for s in STATIONS if s not in CHARGING_STATIONS]
+        if not dests:
+            return
+        destination = random.choice(dests)
+        candidates: List[Tuple[float, Dict[str, Any]]] = []
+        cfg = get_config()
+        for a in amrs:
+            ensure_amr_shape(a)
+            if a["status"] != "idle":
+                continue
+            if float(a["battery"]) <= LOW_BATTERY_FORCE_CHARGE_PCT:
+                _begin_charge(a, force=True)
+                continue
+            if any(t.get("amr_id") == a["id"] and t.get("status") in ("pending", "running") for t in tasks):
+                continue
+            if station_claimed_by_other(destination, amrs, tasks, a["id"]):
+                continue
+            ok, _, cost, _ = _local_evaluate_budget(a, str(a.get("location", "")), destination)
+            if ok:
+                gd = cfg.graph_distance_m(float(a["x"]), float(a["y"]), destination) or 0.0
+                candidates.append((gd, a))
+        if not candidates:
+            return
+        candidates.sort(key=lambda x: x[0])
+        _, amr = candidates[0]
+        tid = f"SC-{fleet_size}-{_job_ctr[0]:04d}"
+        _job_ctr[0] += 1
+        t: Dict[str, Any] = {
+            "task_id": tid, "amr_id": amr["id"],
+            "task_type": "move", "destination": destination,
+            "pickup_station": str(amr.get("location", "")),
+            "drop_station": destination,
+            "priority": random.randint(1, 5), "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "started_at": None, "done_at": None,
+            "origin": str(amr.get("location", "")),
+            "progress_pct": 0.0, "path_total_m": 0.0, "auto_generated": True,
+            "created_sim_s": sa.sim_time_s,  # ← 추가
+            "started_sim_s": None,
+            "done_sim_s": None,
+        }
+        tasks.append(t)
+        # 즉시 시작 시도
+        dest = str(t.get("destination") or "")
+        ok, _, _, _ = _local_evaluate_budget(amr, str(amr.get("location", "")), dest)
+        if ok and amr["status"] == "idle":
+            prev_loc = str(amr.get("location", ""))
+            amr["status"] = "running"
+            amr["location"] = dest
+            amr["active_task_id"] = tid
+            amr["yield_accum_s"] = 0.0
+            amr["reroute_tried"] = False
+            if set_nav_path_for_destination(amr, dest):
+                t["status"] = "running"
+                t["started_at"] = datetime.now().isoformat()
+                t["started_sim_s"] = sa.sim_time_s  # ← 이거 추가
+                t["path_total_m"] = path_polyline_total_m(amr)
+                sa.record_started()
+            else:
+                amr["status"] = "idle"
+                amr["location"] = prev_loc
+                amr["active_task_id"] = None
+                clear_nav(amr)
+
+    # ── 로컬 틱 (실제 시뮬 물리 재사용) ─────────────────────
+    def _local_tick(dt: float) -> None:
+        sa.sim_time_s += dt  # ← 틱당 1회만
+        nav = float(lp["nav_speed"])
+        dr_run = float(lp["battery_drain_running"])
+        dr_idle = float(lp["battery_drain_idle"])
+        dr_nop = float(lp["battery_drain_running_nopower"])
+        chg = float(lp["battery_charge_rate"])
+        rr_s = float(lp["yield_stall_reroute_s"])
+        ab_s = float(lp["yield_stall_abort_s"])
+        crit = float(lp["critical_battery_pct"])
+        cost_per_m = dr_run / max(nav, 0.01)
+
+        # 교행 충돌 감지
+        running = [a for a in amrs if a["status"] == "running" and a.get("path_queue")]
+        yield_ids: Set[str] = set()
+        by_wp: Dict[Tuple[int, int], List[str]] = {}
+        for a in running:
+            w = a["path_queue"][0]
+            key = (round(float(w[0]) * 50), round(float(w[1]) * 50))
+            by_wp.setdefault(key, []).append(a["id"])
+        for aids in by_wp.values():
+            if len(aids) >= 2:
+                aids.sort()
+                yield_ids.update(aids[1:])
+        for i in range(len(running)):
+            for j in range(i + 1, len(running)):
+                a1, a2 = running[i], running[j]
+                d = distance_m(float(a1["x"]), float(a1["y"]), float(a2["x"]), float(a2["y"]))
+                if d < CONFLICT_DIST_M:
+                    yield_ids.add(sorted([a1["id"], a2["id"]])[1])
+        for a in amrs:
+            a["acs_yield"] = a["id"] in yield_ids
+
+        for a in amrs:
+            ensure_amr_shape(a)
+            aid = a["id"]
+            st = a["status"]
+            if st == "error":
+                continue
+
+            has_pending = any(t.get("amr_id") == aid and t.get("status") == "pending" for t in tasks)
+            sa.tick_accum(aid, st, has_pending, dt)
+
+            b = float(a["battery"])
+
+            if b <= 0.0:
+                a["battery"] = 0.0
+                a["status"] = "error"
+                clear_nav(a)
+                tid = a.get("active_task_id")
+                if tid:
+                    task = next((t for t in tasks if t.get("task_id") == tid), None)
+                    if task and task.get("status") == "running":
+                        task["status"] = "failed"
+                        task["done_at"] = datetime.now().isoformat()
+                        sa.record_failed()
+                a["active_task_id"] = None
+                for k in [k for k, v in _local_charger_res.items() if v == aid]:
+                    del _local_charger_res[k]
+                continue
+
+            if st == "running":
+                tid = a.get("active_task_id")
+                task = next((t for t in tasks if t.get("task_id") == tid), None) if tid else None
+
+                # 비상 임계 배터리
+                if task and task.get("status") == "running" and task.get("task_type") not in ("charge", "emergency_drop"):
+                    if b <= crit:
+                        task["status"] = "interrupted"
+                        task["done_at"] = datetime.now().isoformat()
+                        task["interrupt_reason"] = "critical_battery"
+                        sa.record_interrupted()
+                        a["active_task_id"] = None
+                        clear_nav(a)
+                        _begin_charge(a, force=True)
+                        b = max(0.0, b - dr_nop * dt)
+                        a["battery"] = round(min(100.0, b), 2)
+                        continue
+
+                # 교행 정체 처리
+                if task and task.get("status") == "running" and a.get("acs_yield"):
+                    a["yield_accum_s"] = float(a.get("yield_accum_s") or 0.0) + dt
+                    ya = float(a.get("yield_accum_s") or 0.0)
+                    if ya >= rr_s and not a.get("reroute_tried"):
+                        dest_t = str(task.get("destination") or "")
+                        cfg = get_config()
+                        pq = a.get("path_queue") or []
+                        if pq:
+                            ax, ay = float(pq[0][0]), float(pq[0][1])
+                            avoid_nid = cfg.nearest_node_id(ax, ay)
+                            if avoid_nid:
+                                alt = cfg.path_for_labels_avoid_nodes(float(a["x"]), float(a["y"]), dest_t, {avoid_nid})
+                                if alt:
+                                    a["path_queue"] = [[float(px), float(py)] for px, py in alt]
+                                    a["yield_accum_s"] = 0.0
+                                    task["path_total_m"] = path_polyline_total_m(a)
+                        a["reroute_tried"] = True
+                    rem_cost = path_polyline_remaining_m(a) * cost_per_m
+                    if ya >= ab_s or (ya >= 1.0 and rem_cost > max(b - float(lp["safety_margin_pct"]), 0.0)):
+                        if task.get("status") == "running":
+                            task["status"] = "interrupted"
+                            task["done_at"] = datetime.now().isoformat()
+                            task["interrupt_reason"] = "yield_stall_abort"
+                            sa.record_interrupted()
+                        a["active_task_id"] = None
+                        clear_nav(a)
+                        a["status"] = "idle"
+                        _begin_charge(a, force=True)
+                        b = max(0.0, b - dr_nop * dt)
+                        a["battery"] = round(min(100.0, b), 2)
+                        continue
+                elif task and task.get("status") == "running":
+                    a["yield_accum_s"] = 0.0
+                    a["reroute_tried"] = False
+
+                if b < CHARGE_TRIGGER_PCT:
+                    a["low_bat_flag"] = True
+                    a["charge_after_job"] = True
+
+                # 이동 물리
+                if not a.get("acs_yield"):
+                    target = _current_nav_target(a)
+                    if target is not None:
+                        tx, ty = target
+                        x, y = float(a["x"]), float(a["y"])
+                        dx, dy = tx - x, ty - y
+                        dist = math.hypot(dx, dy)
+                        if dist < ARRIVAL_EPS:
+                            sa.add_transport_m(dist)
+                            a["x"], a["y"] = tx, ty
+                            a["vx"] = a["vy"] = 0.0
+                            _advance_path(a)
+                        else:
+                            step = min(nav * dt, dist)
+                            ux, uy = dx / dist, dy / dist
+                            sa.add_transport_m(step)
+                            a["x"] = x + ux * step
+                            a["y"] = y + uy * step
+                            a["vx"] = ux * nav
+                            a["vy"] = uy * nav
+                            a["yaw"] = math.atan2(dy, dx)
+                        b = max(0.0, b - dr_run * dt)
+                    else:
+                        a["vx"] = a["vy"] = 0.0
+                        b = max(0.0, b - dr_nop * dt)
+                else:
+                    a["vx"] = a["vy"] = 0.0
+                    b = max(0.0, b - dr_nop * dt)
+
+                # 진행률 업데이트
+                if task and task.get("status") == "running":
+                    _update_task_progress(task, a)
+
+            elif st == "charging":
+                a["vx"] = a["vy"] = 0.0
+                loc = a.get("location") or ""
+                if loc in CHARGING_STATIONS:
+                    cx, cy = station_coords(loc)
+                    a["x"], a["y"] = cx, cy
+                b = min(100.0, b + chg * dt)
+                if b >= CHARGE_COMPLETE_PCT:
+                    a["status"] = "idle"
+                    a["low_bat_flag"] = False
+                    _try_autostart(a)
+            else:  # idle
+                a["vx"] = a["vy"] = 0.0
+                if b < CHARGE_TRIGGER_PCT and not a.get("active_task_id"):
+                    already = any(
+                        t.get("amr_id") == aid and t.get("task_type") == "charge"
+                        and t.get("status") in ("pending", "running")
+                        for t in tasks
+                    )
+                    if not already:
+                        _begin_charge(a, force=True)
+                b = max(0.0, b - dr_idle * dt)
+
+            a["battery"] = round(max(0.0, min(100.0, b)), 2)
+
+        # 도착 처리
+        for a in amrs:
+            ensure_amr_shape(a)
+            if a["status"] != "running":
+                continue
+            tid = a.get("active_task_id")
+            if not tid:
+                continue
+            task = next((t for t in tasks if t.get("task_id") == tid), None)
+            if not task or task.get("status") != "running":
+                continue
+            if a.get("path_queue"):
+                continue
+            dest = str(task.get("destination") or "")
+            tx, ty = station_coords(dest)
+            if distance_m(float(a["x"]), float(a["y"]), tx, ty) > ARRIVAL_EPS * 3:
+                continue
+            _complete_task_local(task, a)
+
+    # ── 실제 시뮬 루프 ──────────────────────────────────────
+    hz = 50.0
+    dt = 1.0 / hz
+    steps = int(duration_s * hz)
+    dispatch_accum = 0.0
+
+    for _ in range(steps):
+        _local_tick(dt)
+        dispatch_accum += dt
+        if dispatch_accum >= job_interval_s:
+            dispatch_accum = 0.0
+            _spawn_job()
+
+    return sa.summary(amrs, fleet_size, duration_s)

@@ -3,6 +3,7 @@ export default function WaveTopNav({ tab, onTab }) {
     { id: "dashboard", label: "Dashboard" },
     { id: "map-editor", label: "Map Editor" },
     { id: "analysis", label: "Analysis Report" },
+    { id: "scenario", label: "Scenario" },
   ]
   return (
     <nav className="wave-topnav" aria-label="WAVE Fleet Planner">
@@ -30,3 +31,4 @@ export default function WaveTopNav({ tab, onTab }) {
     </nav>
   )
 }
+ 
