@@ -37,26 +37,27 @@ def get_battery_cost_per_meter() -> float:
 
 
 MIN_BATTERY_AFTER_TASK_PCT = 5.0
-LOW_BATTERY_FORCE_CHARGE_PCT = 15.0
 ARRIVAL_EPS = 0.14
-CHARGE_TRIGGER_PCT = 20.0
-CHARGE_COMPLETE_PCT = 80.0
+CHARGE_TRIGGER_PCT = 40.0      # 기존 20.0 → 운영 하한 40%
+CHARGE_COMPLETE_PCT = 90.0     # 기존 80.0 → 운영 상한 90%
+LOW_BATTERY_FORCE_CHARGE_PCT = 35.0  # 기존 15.0 → 35% 이하 강제 충전
 CONFLICT_DIST_M = 0.42
 SAFETY_MARGIN_PCT = 10.0
 CRITICAL_BATTERY_PCT = 8.0
 
 sim_params: Dict[str, Any] = {
-    "nav_speed": 1.35,
-    "battery_drain_running": 1.55,
-    "battery_drain_idle": 0.3,
-    "battery_drain_running_nopower": 0.8,
-    "battery_charge_rate": 14.0,
+    "nav_speed": 1.15,                      # 실제 평균 운영속도 1.1~1.2m/s 중간값
+    "battery_drain_running": 0.00333,       # 12%/h = 0.00333%/s
+    "battery_drain_idle": 0.00222,          # 8%/h = 0.00222%/s
+    "battery_drain_running_nopower": 0.00222, # 교행 대기 = idle과 동일
+    "battery_charge_rate": 0.01068,         # 20A/52Ah = 0.385C → 50%/4680s
     "auto_dispatch_enabled": 1.0,
     "auto_job_interval_s": 7.0,
     "safety_margin_pct": 10.0,
     "critical_battery_pct": 8.0,
     "yield_stall_reroute_s": 3.5,
     "yield_stall_abort_s": 9.0,
+    "sim_speed_multiplier": 1.0,   # 1x ~ 100x
 }
 
 # 충전기 라벨 → 예약한 AMR id (출발 시점부터 도착 시 해제)
@@ -1036,6 +1037,9 @@ _tick_log_accum: float = 0.0
 _TICK_LOG_INTERVAL = 5.0  # 5초마다 배터리 스냅샷 기록
 
 def tick(amr_list: List[Dict[str, Any]], dt: float, task_list: Optional[List[Dict[str, Any]]] = None) -> None:
+    multiplier = float(sim_params.get("sim_speed_multiplier", 1.0))
+    multiplier = max(1.0, min(100.0, multiplier))
+    dt = dt * multiplier   # 내부 시뮬 시간만 배속
     global _tick_log_accum
     refresh_station_cache()
     nav = float(sim_params.get("nav_speed", 1.35))

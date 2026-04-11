@@ -75,11 +75,24 @@ _sim_flog("info", f"서버 시작 | map={MAP_JSON_PATH}")
 _sim_flog("info", f"충전기: {sorted(CHARGING_STATIONS)} | 스테이션: {sorted(STATIONS.keys())}")
 
 # AMR + 작업 (시뮬레이터와 동기화)
-amr_list: List[Dict[str, Any]] = [
-    make_amr("AMR-001", "idle", "Station-A", 95.0),
-    make_amr("AMR-002", "idle", "Station-C", 72.0),
-    make_amr("AMR-003", "charging", "Charger-1", 30.0),
-]
+def _init_amr_list() -> List[Dict[str, Any]]:
+    import simulation as _sim
+    _sim.refresh_station_cache()
+    non_chargers = [s for s in _sim.STATIONS if s not in _sim.CHARGING_STATIONS]
+    chargers = sorted(_sim.CHARGING_STATIONS)
+    labels = non_chargers if non_chargers else list(_sim.STATIONS.keys())
+    result = []
+    if labels:
+        result.append(make_amr("AMR-001", "idle", labels[0], 95.0))
+    if len(labels) > 1:
+        result.append(make_amr("AMR-002", "idle", labels[1], 72.0))
+    if chargers:
+        result.append(make_amr("AMR-003", "charging", chargers[0], 30.0))
+    elif labels:
+        result.append(make_amr("AMR-003", "idle", labels[2 % len(labels)], 60.0))
+    return result
+
+amr_list: List[Dict[str, Any]] = _init_amr_list()
 task_list: List[Dict[str, Any]] = []
 task_counter = 1
 
@@ -311,6 +324,8 @@ class SimParamsUpdate(BaseModel):
     yield_stall_reroute_s: Optional[float] = Field(None, ge=0.5, le=30)
     yield_stall_abort_s: Optional[float] = Field(None, ge=2, le=60)
     fleet_size: Optional[int] = Field(None, ge=1, le=12)
+    sim_speed_multiplier: Optional[float] = Field(None, ge=1.0, le=100.0)
+
 
 
 def _rebuild_fleet(size: int) -> None:
@@ -737,6 +752,7 @@ class ScenarioConfig(BaseModel):
     fleet_sizes: List[int] = Field(default=[5, 7, 9, 12])
     duration_s: float = Field(default=1800.0, ge=30, le=3600)
     job_interval_s: float = Field(default=4.0, ge=2, le=60)
+
     nav_speed: float = Field(default=2.0, ge=0.2, le=4.0)
     battery_drain_running: float = Field(default=0.18, ge=0.01, le=5.0)
     battery_charge_rate: float = Field(default=5.0, ge=0.5, le=20.0)
@@ -911,3 +927,54 @@ def get_scenario_result(job_id: str):
             ),
         },
     }
+
+# ─── 로봇별 이벤트 기록 추가 ──────────────────────────────────
+_robot_logs: Dict[str, List[Dict[str, Any]]] = {}
+
+def record_robot_event(amr_id: str, kind: str, message: str, **extra) -> None:
+    if amr_id not in _robot_logs:
+        _robot_logs[amr_id] = []
+    _robot_logs[amr_id].append({
+        "ts": datetime.now().isoformat(),
+        "kind": kind,
+        "message": message,
+        **extra,
+    })
+    # 로봇별 최대 500개 유지
+    if len(_robot_logs[amr_id]) > 500:
+        _robot_logs[amr_id] = _robot_logs[amr_id][-500:]
+
+@app.get("/amrs/{amr_id}/log")
+def get_amr_log(amr_id: str):
+    from simulation import _robot_logs
+    logs = _robot_logs.get(amr_id, [])
+    return {"amr_id": amr_id, "count": len(logs), "logs": logs}
+
+@app.get("/amrs/{amr_id}/log.txt")
+def download_amr_log(amr_id: str):
+    from fastapi.responses import PlainTextResponse
+    import simulation as _sim
+    amr = next((a for a in amr_list if a["id"] == amr_id), None)
+    if not amr:
+        raise HTTPException(status_code=404, detail="AMR 없음")
+    ensure_amr_shape(amr)
+    try:
+        with open(_sim._LOG_PATH, "r", encoding="utf-8") as f:
+            lines = [l.rstrip() for l in f if amr_id in l]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    header = [
+        f"WAVE AMR 로그 — {amr_id}",
+        f"생성: {datetime.now().isoformat()}",
+        f"현재 상태: {amr.get('status')} | 배터리: {amr.get('battery')}% | 위치: {amr.get('location')}",
+        f"총 {len(lines)}건",
+        "=" * 60,
+        "",
+    ]
+    return PlainTextResponse(
+        "\n".join(header + lines),
+        headers={
+            "Content-Disposition": f"attachment; filename={amr_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt",
+            "Content-Type": "text/plain; charset=utf-8",
+        }
+    )
